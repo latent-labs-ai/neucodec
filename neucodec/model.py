@@ -125,7 +125,7 @@ class NeuCodec(
                 raise ValueError(
                     f"NeuCodec expects tensor audio input to be of shape [B, 1, T] -- received shape: {y.shape}"
                 )
-
+        
         # pad audio
         pad_for_wav = 320 - (y.shape[-1] % 320)
         y = torch.nn.functional.pad(y, (0, pad_for_wav))
@@ -142,18 +142,27 @@ class NeuCodec(
         """
          
         # prepare inputs
-        y = self._prepare_audio(audio_or_path)
-        semantic_features = self.feature_extractor(
-            y.squeeze(0), sampling_rate=16_000, return_tensors="pt"
-        ).input_features.to(self.device)
-
+        y = self._prepare_audio(audio_or_path)  
+        all_semantic_features = []
+        for i in range(y.size(0)):
+            semantic_features = (
+                self.feature_extractor(
+                    y[i, :].cpu(),
+                    sampling_rate=16_000,
+                    return_tensors="pt",
+                )
+                .input_features.to(self.device)
+            )
+            all_semantic_features.append(semantic_features)
+        semantic_features = torch.vstack(all_semantic_features)
+       
         # acoustic encoding
         acoustic_emb = self.CodecEnc(y.to(self.device))
         acoustic_emb = acoustic_emb.transpose(1, 2)
 
         # semantic encoding
         semantic_output = (
-            self.semantic_model(semantic_features).hidden_states[16].transpose(1, 2)
+            self.semantic_model(semantic_features[:]).hidden_states[16].transpose(1, 2)
         )
         semantic_encoded = self.SemanticEncoder_module(semantic_output)
 
@@ -218,16 +227,21 @@ class DistillNeuCodec(NeuCodec):
          
         # prepare inputs
         y = self._prepare_audio(audio_or_path)
-        semantic_features = (
-            self.feature_extractor(
-                F.pad(y[0, :].cpu(), (160, 160)),
-                sampling_rate=16_000,
-                return_tensors="pt",
+        
+        all_semantic_features = []
+        for i in range(y.size(0)):
+            semantic_features = (
+                self.feature_extractor(
+                    F.pad(y[i, :].cpu(), (160, 160)),
+                    sampling_rate=16_000,
+                    return_tensors="pt",
+                )
+                .input_values.to(self.device)
+                .squeeze(0)
             )
-            .input_values.to(self.device)
-            .squeeze(0)
-        )
-
+            all_semantic_features.append(semantic_features)
+        semantic_features = torch.vstack(all_semantic_features)
+    
         # acoustic encoding
         fsq_emb = self.fc_sq_prior(self.codec_encoder(y.to(self.device)))
         fsq_emb = fsq_emb.transpose(1, 2)

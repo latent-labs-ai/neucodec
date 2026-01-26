@@ -6,7 +6,6 @@ from torchaudio import transforms as T
 import librosa
 from ..neucodec import NeuCodec, DistillNeuCodec, NeuCodecOnnxDecoder
 
-
 @pytest.fixture
 def example_audio():
     y, sr = torchaudio.load(librosa.ex("libri1"))
@@ -23,12 +22,12 @@ def example_fpath():
 
 @pytest.fixture
 def neucodec_fixture():
-    return NeuCodec.from_pretrained("neuphonic/neucodec")
+    return NeuCodec.from_pretrained("neuphonic/neucodec").eval()
 
 
 @pytest.fixture
 def distill_neucodec_fixture():
-    return DistillNeuCodec.from_pretrained("neuphonic/distill-neucodec")
+    return DistillNeuCodec.from_pretrained("neuphonic/distill-neucodec").eval()
 
 
 @pytest.fixture
@@ -91,4 +90,22 @@ def test_onnx_decoder(neucodec_fixture, onnx_decoder_fixture, example_fpath):
     min_len = min(recon.shape[-1], recon_onnx.shape[-1])
     assert F.mse_loss(recon[..., :min_len], torch.tensor(recon_onnx[..., :min_len])) < 0.03 # check torch and onnx recons don't deviate
     min_len = min(y_true.shape[-1], recon_onnx_16.shape[-1])
-    assert F.mse_loss(y_true[..., :min_len], recon_onnx_16[..., :min_len]) < 0.03 # check deviation from sample 
+    assert F.mse_loss(y_true[..., :min_len], recon_onnx_16[..., :min_len]) < 0.03 # check deviation from sample
+
+
+@torch.inference_mode()
+def test_neucodec_batched_autoencode(neucodec_fixture, example_audio):
+    y, _ = example_audio
+    y_batched = torch.vstack([y for _ in range(2)])
+    vq_codes = neucodec_fixture.encode_code(y_batched)
+    recon = neucodec_fixture.decode_code(vq_codes)
+    assert torch.allclose(recon[0, :, :], recon[1, :, :], atol=1e-4, rtol=1e-4)
+
+
+@torch.inference_mode()
+def test_distill_neucodec_batched_autoencode(distill_neucodec_fixture, example_audio):
+    y, _ = example_audio
+    y_batched = torch.vstack([y for _ in range(2)])
+    vq_codes = distill_neucodec_fixture.encode_code(y_batched)
+    recon = distill_neucodec_fixture.decode_code(vq_codes)
+    assert torch.allclose(recon[0, :, :], recon[1, :, :], atol=1e-4, rtol=1e-4)
