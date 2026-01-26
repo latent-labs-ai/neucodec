@@ -29,6 +29,9 @@ class NeuCodec(
         self.semantic_model = Wav2Vec2BertModel.from_pretrained(
             "facebook/w2v-bert-2.0", output_hidden_states=True
         )
+        
+        # (harryjulian): remove layers after #16 as we don't need the features after that
+        self.semantic_model.encoder.layers[:16]
         self.feature_extractor = AutoFeatureExtractor.from_pretrained(
             "facebook/w2v-bert-2.0"
         )
