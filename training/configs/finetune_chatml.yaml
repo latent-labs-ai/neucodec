@@ -1,0 +1,186 @@
+# NeuCodec Finetuning Configuration for ChatML Dataset
+# Optimized for Arabic TTS data
+
+# ============= Model Configuration =============
+model:
+  sample_rate: 16000
+  output_sample_rate: 24000
+  hop_length: 480
+  
+  # Encoder settings (from pretrained)
+  encoder:
+    ngf: 48
+    up_ratios: [2, 2, 4, 4, 5]
+    dilations: [1, 3, 9]
+    hidden_dim: 1024
+  
+  # Decoder settings  
+  decoder:
+    hidden_dim: 1024
+    depth: 12
+    heads: 16
+    pos_emb_dim: 64
+    hop_length: 480
+  
+  # FSQ Quantizer settings
+  quantizer:
+    dim: 2048
+    levels: [4, 4, 4, 4, 4, 4, 4, 4]
+    num_quantizers: 1
+  
+  # Semantic encoder (frozen during finetuning)
+  semantic:
+    model_name: "facebook/w2v-bert-2.0"
+    layer_index: 16
+    freeze: true  # Keep frozen for finetuning
+
+# ============= Training Configuration =============
+training:
+  seed: 42
+  # Finetuning uses fewer steps than training from scratch
+  total_steps: 200000
+  warmup_steps: 5000
+  gradient_accumulation_steps: 4
+  mixed_precision: "bf16"
+  gradient_clip_norm: 1.0
+  
+  # Checkpointing
+  save_every_steps: 5000
+  eval_every_steps: 2500
+  log_every_steps: 100
+  keep_last_n_checkpoints: 5
+  
+  # Start from pretrained NeuCodec
+  resume_from: null  # Will load pretrained weights
+  pretrained_model: "neuphonic/neucodec"
+  
+  # Discriminator starts immediately for finetuning
+  discriminator_start_step: 0
+
+# ============= ChatML Data Configuration =============
+data:
+  # Dataset format
+  format: "chatml"
+  
+  # ChatML JSON file paths
+  train_json_paths:
+    - "/path/to/your/train_data.json"
+  val_json_paths:
+    - "/path/to/your/val_data.json"
+  
+  # Audio settings
+  segment_length: 48000  # 3 seconds at 16kHz (Arabic speech tends to be longer)
+  sample_rate: 16000
+  
+  # DataLoader settings
+  batch_size: 16  # Smaller batch for finetuning
+  num_workers: 8
+  pin_memory: true
+  
+  # Duration filtering
+  min_duration: 0.5  # Minimum 0.5 seconds
+  max_duration: 30.0  # Maximum 30 seconds
+  
+  # ChatML specific settings
+  use_reference_audio: true   # Use reference audio from user messages
+  use_target_audio: true      # Use target audio from assistant messages
+  audio_base_path: null       # Set if audio paths are relative
+  
+  # Augmentation (lighter for finetuning)
+  augmentation:
+    enabled: true
+    noise_prob: 0.1           # Lower noise probability
+    noise_snr_range: [15, 35] # Higher SNR (less noise)
+    reverb_prob: 0.1
+    pitch_shift_prob: 0.05    # Less pitch shifting
+    pitch_shift_range: [-1, 1]
+    time_stretch_prob: 0.05
+    time_stretch_range: [0.95, 1.05]
+    volume_range: [-3, 2]
+
+# ============= Optimizer Configuration =============
+optimizer:
+  generator:
+    type: "AdamW"
+    lr: 5.0e-5  # Lower LR for finetuning (2x lower than from-scratch)
+    betas: [0.8, 0.99]
+    weight_decay: 0.01
+    
+  discriminator:
+    type: "AdamW"
+    lr: 5.0e-5
+    betas: [0.8, 0.99]
+    weight_decay: 0.01
+
+# ============= Scheduler Configuration =============
+scheduler:
+  type: "ExponentialLR"
+  gamma: 0.99995  # Slower decay for finetuning
+
+# ============= Loss Configuration =============
+losses:
+  mel:
+    weight: 45.0
+    n_ffts: [512, 1024, 2048]
+    hop_lengths: [128, 256, 512]
+    win_lengths: [512, 1024, 2048]
+    n_mels: 80
+    
+  adversarial:
+    weight: 1.0
+    loss_type: "hinge"
+    
+  feature_matching:
+    weight: 2.0
+    
+  semantic:
+    weight: 1.5  # Slightly higher for preserving semantic quality
+    loss_type: "mse"
+    
+  commitment:
+    weight: 0.25
+    enabled: false
+
+# ============= Discriminator Configuration =============
+discriminators:
+  mpd:
+    enabled: true
+    periods: [2, 3, 5, 7, 11]
+    channels: 32
+    max_channels: 1024
+    
+  msd:
+    enabled: true
+    scales: 3
+    channels: 128
+    max_channels: 1024
+    
+  ms_stft:
+    enabled: true
+    filters: 32
+    n_ffts: [1024, 2048, 512]
+    hop_lengths: [256, 512, 128]
+    win_lengths: [1024, 2048, 512]
+
+# ============= Distributed Training =============
+distributed:
+  enabled: true
+  backend: "nccl"
+  find_unused_parameters: false
+
+# ============= Logging Configuration =============
+logging:
+  project_name: "neucodec-finetune-arabic"
+  run_name: null
+  wandb:
+    enabled: true
+    entity: null
+  tensorboard:
+    enabled: true
+    log_dir: "./logs/tensorboard"
+    
+# ============= Output Configuration =============
+output:
+  checkpoint_dir: "./checkpoints/finetune"
+  log_dir: "./logs/finetune"
+  sample_dir: "./samples/finetune"

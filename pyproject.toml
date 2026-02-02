@@ -21,6 +21,19 @@ vector-quantize-pytorch = "==1.17.8"
 transformers = ">=4.44.2"
 local_attention = ">=1.11.1"
 
+# Optional: training dependencies
+[tool.poetry.group.training]
+optional = true
+
+[tool.poetry.group.training.dependencies]
+pyyaml = ">=6.0"
+wandb = ">=0.15.0"
+tensorboard = ">=2.14.0"
+librosa = ">=0.10.0"
+pesq = ">=0.0.4"
+pystoi = ">=0.4.0"
+scipy = ">=1.11.0"
+
 # Optional: specify dev dependencies
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.2.2"

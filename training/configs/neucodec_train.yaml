@@ -1,0 +1,189 @@
+# NeuCodec Training Configuration
+# Based on BigCodec/X-Codec/HiFi-GAN best practices
+
+# ============= Model Configuration =============
+model:
+  sample_rate: 16000
+  output_sample_rate: 24000
+  hop_length: 480
+  
+  # Encoder settings
+  encoder:
+    ngf: 48
+    up_ratios: [2, 2, 4, 4, 5]
+    dilations: [1, 3, 9]
+    hidden_dim: 1024
+  
+  # Decoder settings  
+  decoder:
+    hidden_dim: 1024
+    depth: 12
+    heads: 16
+    pos_emb_dim: 64
+    hop_length: 480
+  
+  # FSQ Quantizer settings
+  quantizer:
+    dim: 2048
+    levels: [4, 4, 4, 4, 4, 4, 4, 4]  # 16 bits total
+    num_quantizers: 1
+  
+  # Semantic encoder (frozen during training)
+  semantic:
+    model_name: "facebook/w2v-bert-2.0"
+    layer_index: 16
+    freeze: true
+
+# ============= Training Configuration =============
+training:
+  # Basic settings
+  seed: 42
+  total_steps: 1000000
+  warmup_steps: 10000
+  gradient_accumulation_steps: 4
+  mixed_precision: "bf16"  # fp16, bf16, or fp32
+  gradient_clip_norm: 1.0
+  
+  # Checkpointing
+  save_every_steps: 10000
+  eval_every_steps: 5000
+  log_every_steps: 100
+  keep_last_n_checkpoints: 5
+  
+  # Resume training
+  resume_from: null  # Path to checkpoint or null
+  
+  # Discriminator warmup (train generator only first)
+  discriminator_start_step: 0
+
+# ============= Data Configuration =============
+data:
+  # Dataset paths (list of directories or manifest files)
+  train_paths:
+    - "/path/to/your/training/data"
+  val_paths:
+    - "/path/to/your/validation/data"
+  
+  # Audio settings
+  segment_length: 32000  # 2 seconds at 16kHz
+  sample_rate: 16000
+  
+  # DataLoader settings
+  batch_size: 32  # Per GPU
+  num_workers: 8
+  pin_memory: true
+  
+  # Augmentation
+  augmentation:
+    enabled: true
+    noise_prob: 0.3
+    noise_snr_range: [5, 30]  # dB
+    reverb_prob: 0.2
+    pitch_shift_prob: 0.1
+    pitch_shift_range: [-2, 2]  # semitones
+    time_stretch_prob: 0.1
+    time_stretch_range: [0.9, 1.1]
+    volume_range: [-6, 3]  # dB
+    
+  # Filtering
+  min_duration: 1.0  # seconds
+  max_duration: 30.0  # seconds
+
+# ============= Optimizer Configuration =============
+optimizer:
+  generator:
+    type: "AdamW"
+    lr: 1.0e-4
+    betas: [0.8, 0.99]
+    weight_decay: 0.01
+    
+  discriminator:
+    type: "AdamW"
+    lr: 1.0e-4
+    betas: [0.8, 0.99]
+    weight_decay: 0.01
+
+# ============= Scheduler Configuration =============
+scheduler:
+  type: "ExponentialLR"
+  gamma: 0.999875
+  # Alternative: CosineAnnealingWarmRestarts
+  # type: "CosineAnnealingWarmRestarts"
+  # T_0: 50000
+  # T_mult: 2
+
+# ============= Loss Configuration =============
+losses:
+  # Mel spectrogram reconstruction
+  mel:
+    weight: 45.0
+    n_ffts: [512, 1024, 2048]
+    hop_lengths: [128, 256, 512]
+    win_lengths: [512, 1024, 2048]
+    n_mels: 80
+    
+  # Adversarial loss
+  adversarial:
+    weight: 1.0
+    loss_type: "hinge"  # hinge, lsgan, or vanilla
+    
+  # Feature matching loss
+  feature_matching:
+    weight: 2.0
+    
+  # Semantic reconstruction loss
+  semantic:
+    weight: 1.0
+    loss_type: "mse"  # mse or cosine
+    
+  # Commitment loss (if using VQ instead of FSQ)
+  commitment:
+    weight: 0.25
+    enabled: false
+
+# ============= Discriminator Configuration =============
+discriminators:
+  # Multi-Period Discriminator
+  mpd:
+    enabled: true
+    periods: [2, 3, 5, 7, 11]
+    channels: 32
+    max_channels: 1024
+    
+  # Multi-Scale Discriminator  
+  msd:
+    enabled: true
+    scales: 3
+    channels: 128
+    max_channels: 1024
+    
+  # Multi-Scale STFT Discriminator
+  ms_stft:
+    enabled: true
+    filters: 32
+    n_ffts: [1024, 2048, 512]
+    hop_lengths: [256, 512, 128]
+    win_lengths: [1024, 2048, 512]
+
+# ============= Distributed Training =============
+distributed:
+  enabled: true
+  backend: "nccl"
+  find_unused_parameters: false
+
+# ============= Logging Configuration =============
+logging:
+  project_name: "neucodec-training"
+  run_name: null  # Auto-generated if null
+  wandb:
+    enabled: true
+    entity: null  # Your W&B entity
+  tensorboard:
+    enabled: true
+    log_dir: "./logs/tensorboard"
+    
+# ============= Output Configuration =============
+output:
+  checkpoint_dir: "./checkpoints"
+  log_dir: "./logs"
+  sample_dir: "./samples"
