@@ -158,8 +158,7 @@ class NeuCodecTrainer:
         if model_config["semantic"]["freeze"]:
             for param in self.generator.semantic_model.parameters():
                 param.requires_grad = False
-            for param in self.generator.feature_extractor.parameters():
-                param.requires_grad = False
+            # Note: feature_extractor is a HuggingFace preprocessing class, not a PyTorch module
             logger.info("Froze semantic encoder parameters")
         
         self.generator = self.generator.to(self.device)
