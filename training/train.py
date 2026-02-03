@@ -31,6 +31,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
+import torchaudio
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.amp import GradScaler, autocast
 from tqdm import tqdm
@@ -108,6 +109,9 @@ class NeuCodecTrainer:
         
         # Mixed precision scaler
         self.scaler = GradScaler('cuda', enabled=config["training"]["mixed_precision"] != "fp32")
+        
+        # Resampler for 24kHz decoder output to 16kHz for loss computation
+        self.output_resampler = torchaudio.transforms.Resample(24000, 16000)
         
     @property
     def is_main_process(self) -> bool:
@@ -388,10 +392,14 @@ class NeuCodecTrainer:
             # Encode
             fsq_codes = gen_module.encode_code(audio)
             
-            # Decode
+            # Decode (output is 24kHz)
             audio_recon = gen_module.decode_code(fsq_codes)
             
-            # Match lengths
+            # Resample 24kHz output to 16kHz to match input for loss computation
+            # This fixes the sample rate mismatch that caused "fast forward" audio
+            audio_recon = self.output_resampler.to(audio_recon.device)(audio_recon)
+            
+            # Match lengths (now both are 16kHz)
             min_len = min(audio.shape[-1], audio_recon.shape[-1])
             audio = audio[..., :min_len]
             audio_recon = audio_recon[..., :min_len]
@@ -493,6 +501,9 @@ class NeuCodecTrainer:
             gen_module = self.generator.module if self.distributed else self.generator
             fsq_codes = gen_module.encode_code(audio)
             audio_recon = gen_module.decode_code(fsq_codes)
+            
+            # Resample 24kHz output to 16kHz to match input for loss computation
+            audio_recon = self.output_resampler.to(audio_recon.device)(audio_recon)
             
             min_len = min(audio.shape[-1], audio_recon.shape[-1])
             audio = audio[..., :min_len]
