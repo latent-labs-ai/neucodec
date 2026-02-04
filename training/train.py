@@ -99,17 +99,6 @@ class NeuCodecTrainer:
         # Build dataloaders
         self._build_dataloaders()
         
-        # Build losses
-        self._build_losses()
-        
-        # Initialize training state
-        self.global_step = 0
-        self.epoch = 0
-        self.best_val_loss = float("inf")
-        
-        # Mixed precision scaler
-        self.scaler = GradScaler('cuda', enabled=config["training"]["mixed_precision"] != "fp32")
-        
         # Sample rate handling for loss computation
         # CRITICAL FIX: Upsample target to 24kHz instead of downsampling output
         # This ensures full frequency supervision (0-12kHz) for the 24kHz output
@@ -121,6 +110,17 @@ class NeuCodecTrainer:
             # Legacy: downsample output to 16kHz (loses 8-12kHz supervision)
             self.output_resampler = torchaudio.transforms.Resample(24000, 16000)
             logger.warning("Using legacy 16kHz loss computation - 8-12kHz unsupervised!")
+        
+        # Build losses (requires use_native_24k_loss to be set first)
+        self._build_losses()
+        
+        # Initialize training state
+        self.global_step = 0
+        self.epoch = 0
+        self.best_val_loss = float("inf")
+        
+        # Mixed precision scaler
+        self.scaler = GradScaler('cuda', enabled=config["training"]["mixed_precision"] != "fp32")
         
     @property
     def is_main_process(self) -> bool:
