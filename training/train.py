@@ -110,8 +110,17 @@ class NeuCodecTrainer:
         # Mixed precision scaler
         self.scaler = GradScaler('cuda', enabled=config["training"]["mixed_precision"] != "fp32")
         
-        # Resampler for 24kHz decoder output to 16kHz for loss computation
-        self.output_resampler = torchaudio.transforms.Resample(24000, 16000)
+        # Sample rate handling for loss computation
+        # CRITICAL FIX: Upsample target to 24kHz instead of downsampling output
+        # This ensures full frequency supervision (0-12kHz) for the 24kHz output
+        self.use_native_24k_loss = config["training"].get("use_native_24k_loss", True)
+        if self.use_native_24k_loss:
+            self.target_upsampler = torchaudio.transforms.Resample(16000, 24000)
+            logger.info("Using native 24kHz loss computation (upsampling target)")
+        else:
+            # Legacy: downsample output to 16kHz (loses 8-12kHz supervision)
+            self.output_resampler = torchaudio.transforms.Resample(24000, 16000)
+            logger.warning("Using legacy 16kHz loss computation - 8-12kHz unsupervised!")
         
     @property
     def is_main_process(self) -> bool:
@@ -169,6 +178,12 @@ class NeuCodecTrainer:
                 param.requires_grad = False
             # Note: feature_extractor is a HuggingFace preprocessing class, not a PyTorch module
             logger.info("Froze semantic encoder parameters")
+        
+        # Freeze ISTFT head to preserve amplitude characteristics from base model
+        if model_config.get("freeze_istft_head", False):
+            for param in self.generator.generator.head.parameters():
+                param.requires_grad = False
+            logger.info("Froze ISTFT head parameters (preserves amplitude mapping)")
         
         self.generator = self.generator.to(self.device)
         
@@ -342,14 +357,27 @@ class NeuCodecTrainer:
         """Build loss functions."""
         loss_config = self.config["losses"]
         
-        # Mel spectrogram loss
+        # Mel spectrogram loss - use 24kHz if native loss enabled
         mel_config = loss_config["mel"]
+        loss_sample_rate = mel_config.get("sample_rate", self.config["data"]["sample_rate"])
+        if self.use_native_24k_loss:
+            loss_sample_rate = 24000
+            # Scale FFT parameters for 24kHz if not explicitly configured
+            n_ffts = mel_config.get("n_ffts_24k", [int(n * 1.5) for n in mel_config["n_ffts"]])
+            hop_lengths = mel_config.get("hop_lengths_24k", [int(h * 1.5) for h in mel_config["hop_lengths"]])
+            win_lengths = mel_config.get("win_lengths_24k", [int(w * 1.5) for w in mel_config["win_lengths"]])
+            logger.info(f"Mel loss at 24kHz: n_ffts={n_ffts}, hop_lengths={hop_lengths}")
+        else:
+            n_ffts = mel_config["n_ffts"]
+            hop_lengths = mel_config["hop_lengths"]
+            win_lengths = mel_config["win_lengths"]
+        
         self.mel_loss = MultiResolutionMelLoss(
-            sample_rate=self.config["data"]["sample_rate"],
-            n_ffts=mel_config["n_ffts"],
-            hop_lengths=mel_config["hop_lengths"],
-            win_lengths=mel_config["win_lengths"],
-            n_mels=mel_config["n_mels"],
+            sample_rate=loss_sample_rate,
+            n_ffts=n_ffts,
+            hop_lengths=hop_lengths,
+            win_lengths=win_lengths,
+            n_mels=mel_config.get("n_mels", 80),
         ).to(self.device)
         
         # Adversarial losses
@@ -371,10 +399,17 @@ class NeuCodecTrainer:
             "feature_matching": loss_config["feature_matching"]["weight"],
             "semantic": sem_config["weight"],
         }
+        
+        # Amplitude preservation loss (optional)
+        amp_config = loss_config.get("amplitude", {})
+        self.use_amplitude_loss = amp_config.get("enabled", False)
+        self.loss_weights["amplitude"] = amp_config.get("weight", 0.5)
+        if self.use_amplitude_loss:
+            logger.info(f"Amplitude preservation loss enabled, weight={self.loss_weights['amplitude']}")
     
     def train_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
         """Execute single training step."""
-        audio = batch["audio"].to(self.device)  # [B, 1, T]
+        audio = batch["audio"].to(self.device)  # [B, 1, T] at 16kHz
         
         train_config = self.config["training"]
         disc_start = train_config.get("discriminator_start_step", 0)
@@ -395,20 +430,34 @@ class NeuCodecTrainer:
             # Decode (output is 24kHz)
             audio_recon = gen_module.decode_code(fsq_codes)
             
-            # Resample 24kHz output to 16kHz to match input for loss computation
-            # This fixes the sample rate mismatch that caused "fast forward" audio
-            audio_recon = self.output_resampler.to(audio_recon.device)(audio_recon)
+            # CRITICAL: Sample rate handling for loss computation
+            if self.use_native_24k_loss:
+                # Upsample target to 24kHz - preserves full frequency supervision
+                audio_target = self.target_upsampler.to(audio.device)(audio)
+                audio_for_loss = audio_recon
+            else:
+                # Legacy: downsample output to 16kHz (loses 8-12kHz)
+                audio_for_loss = self.output_resampler.to(audio_recon.device)(audio_recon)
+                audio_target = audio
             
-            # Match lengths (now both are 16kHz)
-            min_len = min(audio.shape[-1], audio_recon.shape[-1])
-            audio = audio[..., :min_len]
-            audio_recon = audio_recon[..., :min_len]
+            # Match lengths
+            min_len = min(audio_target.shape[-1], audio_for_loss.shape[-1])
+            audio_target = audio_target[..., :min_len]
+            audio_for_loss = audio_for_loss[..., :min_len]
             
             # Mel loss
-            mel_loss = self.mel_loss(audio_recon, audio)
+            mel_loss = self.mel_loss(audio_for_loss, audio_target)
             losses["mel"] = mel_loss.item()
             
             gen_loss = self.loss_weights["mel"] * mel_loss
+            
+            # Amplitude preservation loss
+            if self.use_amplitude_loss:
+                recon_rms = torch.sqrt(torch.mean(audio_for_loss ** 2, dim=-1))
+                target_rms = torch.sqrt(torch.mean(audio_target ** 2, dim=-1))
+                amp_loss = F.l1_loss(recon_rms, target_rms)
+                losses["amplitude"] = amp_loss.item()
+                gen_loss = gen_loss + self.loss_weights["amplitude"] * amp_loss
             
             # Adversarial losses (after warmup)
             if use_disc:
@@ -420,9 +469,9 @@ class NeuCodecTrainer:
                 all_fake_features = []
                 
                 for name, disc in disc_module.items():
-                    fake_out, fake_feat = disc(audio_recon)
+                    fake_out, fake_feat = disc(audio_for_loss)
                     with torch.no_grad():
-                        real_out, real_feat = disc(audio)
+                        real_out, real_feat = disc(audio_target)
                     
                     all_fake_outputs.append(fake_out)
                     all_real_features.append(real_feat)
@@ -463,8 +512,8 @@ class NeuCodecTrainer:
                 all_fake_outputs = []
                 
                 for name, disc in disc_module.items():
-                    real_out, _ = disc(audio)
-                    fake_out, _ = disc(audio_recon.detach())
+                    real_out, _ = disc(audio_target)
+                    fake_out, _ = disc(audio_for_loss.detach())
                     
                     all_real_outputs.append(real_out)
                     all_fake_outputs.append(fake_out)
@@ -502,14 +551,19 @@ class NeuCodecTrainer:
             fsq_codes = gen_module.encode_code(audio)
             audio_recon = gen_module.decode_code(fsq_codes)
             
-            # Resample 24kHz output to 16kHz to match input for loss computation
-            audio_recon = self.output_resampler.to(audio_recon.device)(audio_recon)
+            # Use same sample rate handling as training
+            if self.use_native_24k_loss:
+                audio_target = self.target_upsampler.to(audio.device)(audio)
+                audio_for_loss = audio_recon
+            else:
+                audio_for_loss = self.output_resampler.to(audio_recon.device)(audio_recon)
+                audio_target = audio
             
-            min_len = min(audio.shape[-1], audio_recon.shape[-1])
-            audio = audio[..., :min_len]
-            audio_recon = audio_recon[..., :min_len]
+            min_len = min(audio_target.shape[-1], audio_for_loss.shape[-1])
+            audio_target = audio_target[..., :min_len]
+            audio_for_loss = audio_for_loss[..., :min_len]
             
-            mel_loss = self.mel_loss(audio_recon, audio)
+            mel_loss = self.mel_loss(audio_for_loss, audio_target)
             total_mel_loss += mel_loss.item()
             num_batches += 1
         

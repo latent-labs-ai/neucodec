@@ -1,0 +1,202 @@
+# NeuCodec Finetuning Configuration v2 - FIXED
+# Critical fixes for sample rate mismatch and quality improvements
+# For Arabic TTS data
+
+# ============= Model Configuration =============
+model:
+  sample_rate: 16000
+  output_sample_rate: 24000
+  hop_length: 480
+  
+  # Encoder settings (from pretrained)
+  encoder:
+    ngf: 48
+    up_ratios: [2, 2, 4, 4, 5]
+    dilations: [1, 3, 9]
+    hidden_dim: 1024
+  
+  # Decoder settings  
+  decoder:
+    hidden_dim: 1024
+    depth: 12
+    heads: 16
+    pos_emb_dim: 64
+    hop_length: 480
+  
+  # FSQ Quantizer settings
+  quantizer:
+    dim: 2048
+    levels: [4, 4, 4, 4, 4, 4, 4, 4]
+    num_quantizers: 1
+  
+  # Semantic encoder (frozen during finetuning)
+  semantic:
+    model_name: "facebook/w2v-bert-2.0"
+    layer_index: 16
+    freeze: true
+  
+  # NEW: Freeze ISTFT head to preserve amplitude mapping from base model
+  freeze_istft_head: true
+
+# ============= Training Configuration =============
+training:
+  seed: 42
+  total_steps: 200000
+  warmup_steps: 5000
+  gradient_accumulation_steps: 4
+  mixed_precision: "bf16"
+  gradient_clip_norm: 1.0
+  
+  # CRITICAL FIX: Use native 24kHz loss computation
+  # Upsamples target to 24kHz instead of downsampling output
+  # This enables full 0-12kHz frequency supervision
+  use_native_24k_loss: true
+  
+  # Checkpointing
+  save_every_steps: 5000
+  eval_every_steps: 2500
+  log_every_steps: 100
+  keep_last_n_checkpoints: 5
+  
+  # Start from pretrained NeuCodec
+  resume_from: null
+  pretrained_model: "neuphonic/neucodec"
+  
+  # Discriminator starts immediately for finetuning
+  discriminator_start_step: 0
+
+# ============= ChatML Data Configuration =============
+data:
+  format: "chatml"
+  
+  train_json_paths:
+    - "/scratch/vikram.solanki/workspace/vs/neutts/datasets/raw/gulf_tts_v3_dataset_chatml.json"
+    - "/scratch/vikram.solanki/workspace/vs/neutts/datasets/raw/tts_dialect_data_v1_chatml.json"
+  val_json_paths: null
+  val_split_ratio: 0.05
+  
+  segment_length: 48000  # 3 seconds at 16kHz
+  sample_rate: 16000
+  
+  batch_size: 16
+  num_workers: 4
+  pin_memory: true
+  
+  min_duration: 0.5
+  max_duration: 30.0
+  
+  use_reference_audio: true
+  use_target_audio: true
+  audio_base_path: "/scratch/vikram.solanki/workspace/vs/neutts/datasets/raw"
+  
+  augmentation:
+    enabled: true
+    noise_prob: 0.1
+    noise_snr_range: [15, 35]
+    reverb_prob: 0.05
+    pitch_shift_prob: 0.0
+    pitch_shift_range: [-1, 1]
+    time_stretch_prob: 0.0
+    time_stretch_range: [0.95, 1.05]
+    volume_range: [-3, 2]
+    lowpass_prob: 0.0
+    highpass_prob: 0.0
+
+# ============= Optimizer Configuration =============
+optimizer:
+  generator:
+    type: "AdamW"
+    lr: 5.0e-5
+    betas: [0.8, 0.99]
+    weight_decay: 0.01
+    
+  discriminator:
+    type: "AdamW"
+    lr: 5.0e-5
+    betas: [0.8, 0.99]
+    weight_decay: 0.01
+
+# ============= Scheduler Configuration =============
+scheduler:
+  type: "ExponentialLR"
+  gamma: 0.99995
+
+# ============= Loss Configuration =============
+losses:
+  mel:
+    weight: 30.0  # Reduced from 45 for better balance
+    # Base FFT params (for 16kHz) - will be auto-scaled 1.5x for 24kHz
+    n_ffts: [512, 1024, 2048]
+    hop_lengths: [128, 256, 512]
+    win_lengths: [512, 1024, 2048]
+    # Explicit 24kHz params (used when use_native_24k_loss=true)
+    n_ffts_24k: [768, 1536, 3072]
+    hop_lengths_24k: [192, 384, 768]
+    win_lengths_24k: [768, 1536, 3072]
+    n_mels: 100  # Increased for wider frequency range
+    
+  adversarial:
+    weight: 2.0  # Increased from 1.0
+    loss_type: "hinge"
+    
+  feature_matching:
+    weight: 5.0  # Increased from 2.0
+    
+  semantic:
+    weight: 1.5
+    loss_type: "mse"
+    
+  # NEW: Amplitude preservation loss
+  amplitude:
+    weight: 0.5
+    enabled: true
+    
+  commitment:
+    weight: 0.1  # Reduced for stability
+    enabled: true  # ENABLED - prevents quantizer drift
+
+# ============= Discriminator Configuration =============
+# CRITICAL: Scaled for 24kHz operation
+discriminators:
+  mpd:
+    enabled: true
+    periods: [2, 3, 5, 7, 11, 13]  # Added 13 for 24kHz
+    channels: 32
+    max_channels: 1024
+    
+  msd:
+    enabled: true
+    scales: 3
+    channels: 128
+    max_channels: 1024
+    
+  ms_stft:
+    enabled: true
+    filters: 32
+    # Scaled 1.5x for 24kHz audio
+    n_ffts: [1536, 3072, 768]
+    hop_lengths: [384, 768, 192]
+    win_lengths: [1536, 3072, 768]
+
+# ============= Distributed Training =============
+distributed:
+  enabled: true
+  backend: "nccl"
+  find_unused_parameters: false
+
+# ============= Logging Configuration =============
+logging:
+  project_name: "neucodec-finetune-arabic-v2"
+  run_name: null
+  wandb:
+    enabled: true
+    entity: null
+  tensorboard:
+    enabled: true
+    log_dir: "./logs/tensorboard"
+    
+# ============= Output Configuration =============
+output:
+  checkpoint_dir: "./checkpoints/finetune_v2"
+  log_dir: "./logs/finetune_v2"
+  sample_dir: "./samples/finetune_v2"
